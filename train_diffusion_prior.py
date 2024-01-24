@@ -19,12 +19,8 @@ from dalle2_pytorch.train_configs import (
     TrainDiffusionPriorConfig,
 )
 
-
 # helpers
-
-
 cos = nn.CosineSimilarity(dim=1, eps=1e-6)
-
 
 def exists(val):
     return val is not None

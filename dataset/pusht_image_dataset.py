@@ -164,7 +164,6 @@ class PushTPureImageDataset(BaseImageDataset):
 class PushTCLIPDataset(BaseImageDataset):
     def __init__(self,
                  zarr_path,
-                 transform=None,
                  horizon=1,
                  pad_before=0,
                  pad_after=0,
@@ -195,7 +194,6 @@ class PushTCLIPDataset(BaseImageDataset):
         self.horizon = horizon
         self.pad_before = pad_before
         self.pad_after = pad_after
-        self.transform = transform if transform is not None else T.Compose([T.ToTensor()])
 
     def get_validation_dataset(self):
         val_set = copy.copy(self)
@@ -232,8 +230,6 @@ class PushTCLIPDataset(BaseImageDataset):
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
         sample = self.sampler.sample_sequence(idx)
         data = self._sample_to_data(sample)
-        if self.transform:
-            data = self.transform(data)
         return data['image'], data['action']
 
 def test():

@@ -1,6 +1,7 @@
 import torch
+import os
 from dalle2_pytorch import CLIP
-from dataset.pusht_image_dataset import PushTPureImageDataset
+from dataset.pusht_image_dataset import PushTCLIPDataset
 import argparse
 from pathlib import Path
 
@@ -14,9 +15,11 @@ import wandb
 parser = argparse.ArgumentParser()
 parser.add_argument('--lr', type=float, default=5e-4, help='learning rate')
 parser.add_argument('--decay', type=float, default=0.2, help='decay rate')
-parser.add_argument('--epochs', type=int, default=1000, help='number of epochs')
+parser.add_argument('--num_epochs', type=int, default=1000, help='number of epochs')
 parser.add_argument('--batch_size', type=int, default=64, help='batch size')
+parser.add_argument('--save_interval', type=int, default=100, help='save interval')
 parser.add_argument('--data_path', type = str, default = '/proj/cloudrobotics-nest/users/x_ruiwa/pusht/pusht_cchi_v7_replay.zarr', help = 'The directory for training data')
+parser.add_argument('--save_dir', type=str, default='/proj/cloudrobotics-nest/users/x_ruiwa/running_clip/train_clip', help='The directory for saving checkpoints')
 args = parser.parse_args()
 
 def save_model(path):
@@ -52,16 +55,16 @@ run = wandb.init(
 )
 
 model = CLIP(
-    dim_text = 512,
-    dim_image = 512,
-    dim_latent = 512,
+    dim_text = 64,
+    dim_image = 64,
+    dim_latent = 128,
     num_text_tokens = 49408,
     text_enc_depth = 1,
-    text_seq_len = 256,
+    text_seq_len = 2,
     text_heads = 8,
     visual_enc_depth = 1,
-    visual_image_size = 256,
-    visual_patch_size = 32,
+    visual_image_size = 96,
+    visual_patch_size = 16,
     visual_heads = 8,
     use_all_token_embeds = True,            # whether to use fine-grained contrastive learning (FILIP)
     decoupled_contrastive_learning = True,  # use decoupled contrastive learning (DCL) objective function, removing positive pairs from the denominator of the InfoNCE loss (CLOOB + DCL)
@@ -91,7 +94,7 @@ def configure_optimizers(learning_rate, weight_decay):
         warmup_steps=2000
     )
 
-    return {'optimizer': optimizer, 'lr_scheduler': lr_scheduler}
+    return optimizer, lr_scheduler
 
 # Example training loop
 num_epochs = 500  # total number of epochs
@@ -113,19 +116,12 @@ for epoch in range(num_epochs):
 wandb.finish()
 
 device = "cuda:0" if torch.cuda.is_available() else "cpu"  # If using GPU then use mixed precision training.
-model, preprocess = clip.load("ViT-B/32", device=device, jit=False)  # Must set jit=False for training
-dataset = PushTPureImageDataset(zarr_path=args.data_path, transform=None, horizon=1)
+# model, preprocess = clip.load("ViT-B/32", device=device, jit=False)  # Must set jit=False for training
+dataset = PushTCLIPDataset(zarr_path=args.data_path, horizon=1)
 train_dataloader = DataLoader(dataset, batch_size=args.batch_size)  # Define your own dataloader
+optimizer, scheduler = configure_optimizers(args.lr, args.weight_decay)
 
-
-# https://github.com/openai/CLIP/issues/57
-def convert_models_to_fp32(model):
-    for p in model.parameters():
-        p.data = p.data.float()
-        p.grad.data = p.grad.data.float()
-
-# add your own code to track the training progress.
-for epoch in range(EPOCH):
+for epoch in range(args.num_epochs):
     for batch in train_dataloader:
         optimizer.zero_grad()
 
@@ -134,15 +130,29 @@ for epoch in range(EPOCH):
         images = images.to(device)
         texts = texts.to(device)
 
-        logits_per_image, logits_per_text = model(images, texts)
+        loss = model(
+            texts,
+            images,
+            freeze_image_encoder=False,
+            return_loss=True
+        )
 
-        ground_truth = torch.arange(len(images), dtype=torch.long, device=device)
+        loss.backward()
+        optimizer.step()
 
-        total_loss = (loss_img(logits_per_image, ground_truth) + loss_txt(logits_per_text, ground_truth)) / 2
-        total_loss.backward()
-        if device == "cpu":
-            optimizer.step()
-        else:
-            convert_models_to_fp32(model)
-            optimizer.step()
-            clip.model.convert_weights(model)
+        logs = {
+            **logs,
+            'epoch': epoch,
+            'loss': loss.item(),
+            'lr': scheduler.get_lr()
+        }
+        wandb.log(logs)
+
+        # Save model every 100 epochs
+        if (epoch + 1) % args.save_interval == 0:
+            model_path = os.path.join(args.save_dir, f"model_epoch_{epoch + 1}.pth")
+            torch.save(model.state_dict(), model_path)
+            wandb.save(model_path)
+
+    scheduler.step()
+wandb.finish()
