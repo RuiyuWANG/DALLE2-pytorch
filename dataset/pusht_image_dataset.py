@@ -173,7 +173,7 @@ class PushTCLIPDataset(BaseImageDataset):
                  ):
         super().__init__()
         self.replay_buffer = ReplayBuffer.copy_from_path(
-            zarr_path, keys=['img'])
+            zarr_path, keys=['img', 'action'])
         val_mask = get_val_mask(
             n_episodes=self.replay_buffer.n_episodes,
             val_ratio=val_ratio,

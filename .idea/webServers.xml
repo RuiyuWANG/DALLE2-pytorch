@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="WebServers">
+    <option name="servers">
+      <webServer id="3858670e-a09f-47eb-9535-b2fe02114d20" name="ber">
+        <fileTransfer rootFolder="/home/x_ruiwa/DALLE2-pytorch" accessType="SFTP" host="berzelius.nsc.liu.se" port="22" sshConfigId="c05669aa-6260-440e-85f9-7a861aeb76eb" sshConfig="x_ruiwa@berzelius.nsc.liu.se:22 password">
+          <advancedOptions>
+            <advancedOptions dataProtectionLevel="Private" keepAliveTimeout="0" passiveMode="true" shareSSLContext="true" />
+          </advancedOptions>
+        </fileTransfer>
+      </webServer>
+    </option>
+  </component>
+</project>

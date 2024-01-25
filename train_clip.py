@@ -9,7 +9,7 @@ from torchvision import transforms as T
 from torch.utils.data import DataLoader
 from torchvision.datasets import ImageFolder
 from torchvision.utils import make_grid, save_image
-
+from torch.optim.lr_scheduler import CosineAnnealingLR
 import wandb
 
 parser = argparse.ArgumentParser()
@@ -18,6 +18,11 @@ parser.add_argument('--decay', type=float, default=0.2, help='decay rate')
 parser.add_argument('--num_epochs', type=int, default=1000, help='number of epochs')
 parser.add_argument('--batch_size', type=int, default=64, help='batch size')
 parser.add_argument('--save_interval', type=int, default=100, help='save interval')
+parser.add_argument('--val_interval', type=int, default=100, help='val interval')
+parser.add_argument('--val_ratio', type=float, default=0.03, help='val ratio')
+parser.add_argument('--device', type=str, default='cuda', help='device')
+parser.add_argument('--weight_decay', type=float, default=0.02, help='weight decay')
+parser.add_argument('--t_max', type=int, default=1000, help='for learning rate scheduler')
 parser.add_argument('--data_path', type = str, default = '/proj/cloudrobotics-nest/users/x_ruiwa/pusht/pusht_cchi_v7_replay.zarr', help = 'The directory for training data')
 parser.add_argument('--save_dir', type=str, default='/proj/cloudrobotics-nest/users/x_ruiwa/running_clip/train_clip', help='The directory for saving checkpoints')
 args = parser.parse_args()
@@ -40,25 +45,25 @@ def save_model(path):
 
     torch.save(save_obj, path)
 
-model_config = dict(
-    num_tokens=NUM_TOKENS,
-    smooth_l1_loss=SMOOTH_L1_LOSS,
-    num_resnet_blocks=NUM_RESNET_BLOCKS,
-    kl_loss_weight=KL_LOSS_WEIGHT
-)
+# model_config = dict(
+#     lr=args.lr,
+#     smooth_l1_loss=SMOOTH_L1_LOSS,
+#     num_resnet_blocks=NUM_RESNET_BLOCKS,
+#     kl_loss_weight=KL_LOSS_WEIGHT
+# )
 
 run = wandb.init(
     project='dalle_train_clip',
     job_type='train_model',
     name='original',
-    config=model_config
+    # config=model_config
 )
 
 model = CLIP(
     dim_text = 64,
     dim_image = 64,
     dim_latent = 128,
-    num_text_tokens = 49408,
+    num_text_tokens = 64,
     text_enc_depth = 1,
     text_seq_len = 2,
     text_heads = 8,
@@ -76,59 +81,25 @@ model = CLIP(
     image_ssl_loss_weight = 0.05            # weight for image self-supervised learning loss
 ).cuda()
 
-def configure_optimizers(learning_rate, weight_decay):
-    # optimizer = torch.optim.SGD(
-    #     self.parameters(),
-    #     lr=lr,
-    #     momentum=0.9
-    # )
-    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate, betas=(0.9, 0.98), eps=1e-6,
-                       weight_decay=weight_decay)
 
-    lr_scheduler = CosineAnnealingWarmupRestarts(
-        optimizer,
-        first_cycle_steps=self.num_training_steps,
-        cycle_mult=1.0,
-        max_lr=lr,
-        min_lr=0,
-        warmup_steps=2000
-    )
-
-    return optimizer, lr_scheduler
-
-# Example training loop
-num_epochs = 500  # total number of epochs
-save_interval = 100  # save every 100 epochs
-
-for epoch in range(num_epochs):
-    # Your training process here
-    # ...
-
-    # Log metrics to wandb
-    wandb.log({"loss": loss_value, "accuracy": accuracy_value})
-
-    # Save model every 100 epochs
-    if (epoch + 1) % save_interval == 0:
-        model_path = f"model_epoch_{epoch+1}.pth"
-        torch.save(model.state_dict(), model_path)
-        wandb.save(model_path)
-
-wandb.finish()
-
-device = "cuda:0" if torch.cuda.is_available() else "cpu"  # If using GPU then use mixed precision training.
-# model, preprocess = clip.load("ViT-B/32", device=device, jit=False)  # Must set jit=False for training
-dataset = PushTCLIPDataset(zarr_path=args.data_path, horizon=1)
-train_dataloader = DataLoader(dataset, batch_size=args.batch_size)  # Define your own dataloader
-optimizer, scheduler = configure_optimizers(args.lr, args.weight_decay)
+train_dataset = PushTCLIPDataset(zarr_path=args.data_path, horizon=1, val_ratio=args.val_ratio)
+val_dataset = train_dataset.get_validation_dataset()
+train_dataloader = DataLoader(train_dataset, batch_size=args.batch_size)
+val_dataloader = DataLoader(val_dataset, batch_size=args.batch_size)
+optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, betas=(0.9, 0.98), eps=1e-6,
+                       weight_decay=args.weight_decay)
+lr_scheduler = CosineAnnealingLR(optimizer, T_max=args.t_max)
 
 for epoch in range(args.num_epochs):
     for batch in train_dataloader:
         optimizer.zero_grad()
 
         images, texts = batch
+        images = torch.moveaxis(images, -1, 1) / 255.
+        print(images.shape)
 
-        images = images.to(device)
-        texts = texts.to(device)
+        images = images.to(args.device)
+        texts = texts.to(args.device)
 
         loss = model(
             texts,
@@ -141,12 +112,30 @@ for epoch in range(args.num_epochs):
         optimizer.step()
 
         logs = {
-            **logs,
             'epoch': epoch,
             'loss': loss.item(),
             'lr': scheduler.get_lr()
         }
-        wandb.log(logs)
+
+        model.eval()
+        if (epoch + 1) % args.val_ratio == 0:
+            with torch.no_grad():
+                val_losses = list()
+                for batch in val_dataloader:
+                    images, texts = batch
+                    images = images.to(args.device)
+                    texts = texts.to(args.device)
+                    loss = model(
+                        texts,
+                        images,
+                        freeze_image_encoder=False,
+                        return_loss=True
+                    )
+                    val_losses.append(loss)
+                logs['val_loss'] = val_losses
+
+                del val_losses
+                del batch
 
         # Save model every 100 epochs
         if (epoch + 1) % args.save_interval == 0:
@@ -154,5 +143,7 @@ for epoch in range(args.num_epochs):
             torch.save(model.state_dict(), model_path)
             wandb.save(model_path)
 
+        wandb.log(logs)
+        model.train()
     scheduler.step()
 wandb.finish()
