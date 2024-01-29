@@ -10,10 +10,11 @@ from torch.utils.data import DataLoader
 from torchvision.datasets import ImageFolder
 from torchvision.utils import make_grid, save_image
 from torch.optim.lr_scheduler import CosineAnnealingLR
+from warmup_scheduler import GradualWarmupScheduler
 import wandb
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--lr', type=float, default=1e-4, help='learning rate')
+parser.add_argument('--lr', type=float, default=5e-5, help='learning rate')
 parser.add_argument('--decay', type=float, default=0.2, help='decay rate')
 parser.add_argument('--num_epochs', type=int, default=1000, help='number of epochs')
 parser.add_argument('--batch_size', type=int, default=64, help='batch size')
@@ -22,7 +23,8 @@ parser.add_argument('--val_interval', type=int, default=100, help='val interval'
 parser.add_argument('--val_ratio', type=float, default=0.03, help='val ratio')
 parser.add_argument('--device', type=str, default='cuda', help='device')
 parser.add_argument('--weight_decay', type=float, default=0.02, help='weight decay')
-parser.add_argument('--t_max', type=int, default=1000, help='for learning rate scheduler')
+parser.add_argument('--t_max', type=int, default=200, help='for learning rate scheduler')
+parser.add_argument('--warmup_epochs', type=int, default=5, help='warmup epochs')
 parser.add_argument('--dim_data', type=int, default=64, help='dimension of text and image emb')
 parser.add_argument('--dim_latent', type=int, default=256, help='dimension of latent')
 parser.add_argument('--data_path', type = str, default = '/proj/cloudrobotics-nest/users/x_ruiwa/pusht/pusht_cchi_v7_replay.zarr', help = 'The directory for training data')
@@ -49,13 +51,14 @@ def save_model(path):
 
 model_config = dict(
     dim_data = args.dim_data,
-    dim_latent = args.dim_latent
+    dim_latent = args.dim_latent,
+    lr = args.lr
 )
 
 run = wandb.init(
     project='dalle_train_clip',
     job_type='train_model',
-    name='transformer_transformer',
+    name='transformer_transformer_wt_warmup_slr_shuffled',
     config=model_config
 )
 
@@ -84,11 +87,12 @@ model = CLIP(
 
 train_dataset = PushTCLIPDataset(zarr_path=args.data_path, horizon=1, val_ratio=args.val_ratio)
 val_dataset = train_dataset.get_validation_dataset()
-train_dataloader = DataLoader(train_dataset, batch_size=args.batch_size)
-val_dataloader = DataLoader(val_dataset, batch_size=args.batch_size)
+train_dataloader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True)
+val_dataloader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False)
 optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, betas=(0.9, 0.98), eps=1e-6,
                        weight_decay=args.weight_decay)
 lr_scheduler = CosineAnnealingLR(optimizer, T_max=args.t_max)
+scheduler_warmup = GradualWarmupScheduler(optimizer, multiplier=1, total_epoch=args.warmup_epochs, after_scheduler=lr_scheduler)
 
 for epoch in range(args.num_epochs):
     for batch in train_dataloader:
@@ -114,7 +118,7 @@ for epoch in range(args.num_epochs):
         logs = {
             'epoch': epoch,
             'loss': loss.item(),
-            'lr': lr_scheduler.get_lr()[0]
+            'lr': scheduler_warmup.get_lr()[0]
         }
 
         model.eval()
@@ -146,5 +150,5 @@ for epoch in range(args.num_epochs):
 
         wandb.log(logs)
         model.train()
-    lr_scheduler.step()
+    scheduler_warmup.step(epoch)
 wandb.finish()
